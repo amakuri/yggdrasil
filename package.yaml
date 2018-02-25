@@ -23,18 +23,18 @@ dependencies:
 - base >= 4.7 && < 5
 
 library:
-  source-dirs: src
+  source-dirs: Source
 
-executables:
-  Yggdrasil-exe:
-    main:                Main.hs
-    source-dirs:         app
-    ghc-options:
-    - -threaded
-    - -rtsopts
-    - -with-rtsopts=-N
-    dependencies:
-    - Yggdrasil
+# executables:
+#   Yggdrasil-exe:
+#     main:                Main.hs
+#     source-dirs:         Main
+#     ghc-options:
+#     - -threaded
+#     - -rtsopts
+#     - -with-rtsopts=-N
+#     dependencies:
+#     - Yggdrasil
 
 tests:
   Yggdrasil-test:
