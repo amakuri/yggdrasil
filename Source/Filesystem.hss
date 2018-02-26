@@ -1,0 +1,22 @@
+
+module Filesystem
+  (
+      ExFile, exFile,
+      ExDir
+  )
+  where
+
+import Control.Monad.Except
+import System.Directory
+import System.FilePath
+
+newtype ExFile = ExFile FilePath
+newtype ExDir = ExDir FilePath
+
+exFile :: FilePath -> ExceptT String IO ExFile
+exFile p =
+  do
+      bExists <- lift $ doesDirectoryExist p
+      if bExists
+        then (return (ExFile p))
+        else (throwError ("File " + p + "does not exist."))

@@ -1,0 +1,179 @@
+
+module Main where
+
+-- Import System --
+import System.FilePath hiding ((-<.>))
+import System.Directory
+import System.Exit
+import Control.Monad.Trans.Either
+
+-- Import Shake Build System --
+import Development.Shake
+import Development.Shake.Command
+import Development.Shake.FilePath
+import Development.Shake.Util
+
+-- Import Project Paths --
+import qualified Paths
+import qualified Paths.BuildSystem as BuildSystem
+import qualified Paths.Tools as Tools
+import qualified Paths.Foundation as Foundation
+import qualified Paths.OuterSphere as OuterSphere
+import qualified Bridge
+import qualified Bridge.Cpp
+
+main :: IO ()
+main = env >>= either messageError build
+  where
+    env = do root  <- Paths.root
+             ubt   <- Tools.unrealBuildToolPath
+             return $ Environment
+                        <$> (Right root)
+                        <*> ubt `orElse` "Could not find UnrealBuildTool"
+
+
+build :: Environment -> IO ()
+build Environment
+  {
+      root = root,
+      ubt = ubt
+  }
+  = shakeArgs shakeOptions {shakeFiles = root->>Paths.globalBuild} $
+    do
+
+        -- let foundationTargetH = OuterSphere.foundation root </> "Foundation.h"
+        want [root->>OuterSphere.dll]
+        -- want [foundationTargetH]
+
+        --- Depend on BuildSystem ---
+        root->>Paths.selfDependency %> \_ -> do
+            putNormal "+++ BuildSystem changed +++"
+            sources <- getDirectoryFiles (root->>BuildSystem.root)
+                                         [ "//*.hs", "//*.cabal" ]
+            need $ (root->>BuildSystem.root </>) <$> sources
+            liftIO $ writeFileUtf8 (root->>Paths.selfDependency) ("Timestamp" :: Text)
+
+        --- Generate C Hsk Bridge for Foundation ---
+        root->>Foundation.generatedSource </> "*.hs" %> \output -> do
+            -- putNormal ("Generating " ++ output)
+
+            let name = output->>takeFileName
+            let input_h   = root->>Foundation.presource </> name -<.> ".h"
+            let input_chs = root->>Foundation.presource </> name -<.> ".chs"
+
+            let target_h   = root->>Foundation.generatedSource </> name -<.> ".h"
+            let target_chs = root->>Foundation.generatedSource </> name -<.> ".chs"
+            let target_chi = root->>Foundation.generatedSource </> name -<.> ".chi"
+
+            need [ root->>Paths.selfDependency ]
+            need [ input_h, input_chs ]
+
+            liftIO $ copyFile input_h target_h
+            liftIO $ copyFile input_chs target_chs
+
+            () <- cmd Shell (Cwd $ root->>Foundation.generatedSource)
+                 _stack [ "exec", "c2hs", "--", target_chs ]
+
+            liftIO $ sequence_ $ removeFile <$> [target_chi, target_chs, target_h]
+
+        --- Build Foundation ---
+        root->>Foundation.dll %> \_ -> do
+            putNormal "+++ Building Foundation +++"
+
+            presources <- getDirectoryFiles (root->>Foundation.presource)
+                                            [ "*.chs" ]
+
+            sources <- getDirectoryFiles (root->>Foundation.source)
+                                         [ "//*.hs", "//*.cabal", "//*.c"]
+
+            need $
+              [ root->>Paths.selfDependency ] ++
+              [ root->>Foundation.generatedSource </> s -<.> ".hs" | s <- presources ] ++
+              [ root->>Foundation.source </> s | s <- sources ]
+
+            () <- cmd (Cwd $ root->>Foundation.root) _stack [ _build ]
+            () <- cmd (Cwd $ root->>Foundation.root) _stack [ "install", "--local-bin-path", root->>Foundation.build ]
+            putNormal "=== Foundation Build Complete ==="
+
+        --- Copy Foundation dll ---
+        root->>OuterSphere.foundationDll %> \_ -> do
+            need [root->>Paths.selfDependency, root->>Foundation.dll]
+            liftIO $ copyFile (root->>Foundation.dll) (root->>OuterSphere.foundationDll)
+
+        --- Generate C++ Files for Foundation inside OuterSphere ---
+        let foundationTargetH = root->>OuterSphere.foundation </> "Foundation.h"
+        let foundationTargetCpp = root->>OuterSphere.foundation </> "Foundation.cpp"
+        [foundationTargetH, foundationTargetCpp] &%> \outs -> do
+            putNormal $ "+++ Generating files for Foundation +++"
+            relSources <- getDirectoryFiles
+                          (root->>Foundation.source)
+                          ["//*.hs"]
+            let sources = [ root->>Foundation.source </> s | s <- relSources ]
+            need sources
+            need [Paths.selfDependency root]
+            bridge <- liftIO $ runEitherT $ Bridge.generate sources
+
+            case bridge of
+              Left err -> liftIO $ ioError $ userError err
+              Right b -> do
+                  liftIO $ writeFileUtf8 foundationTargetH (b->>Bridge.Cpp.header)
+                  liftIO $ writeFileUtf8 foundationTargetCpp (b->>Bridge.Cpp.source)
+            putNormal "=== File Generation Complete ==="
+
+        --- Copy Internal Header Files for OuterSphere ---
+        root->>OuterSphere.foundationInternal </> "*.h" %> \output -> do
+            let name = output->>takeFileName
+            let source_h = root->>Foundation.presource </> name
+
+            need [ root->>Paths.selfDependency ]
+            need [ source_h ]
+
+            liftIO $ copyFile source_h output
+
+        --- Build OuterSphere ---
+        root->>OuterSphere.dll %> \_ -> do
+            putNormal "+++ Building OuterSphere +++"
+            sources <- getDirectoryFiles
+                          (root->>OuterSphere.source)
+                          ["//*.cs", "//*.cpp", "//*.h"]
+            foundationHeaders <- getDirectoryFiles
+                                (root->>Foundation.presource)
+                                ["*.h"]
+            need [ root->>Paths.selfDependency ]
+            need [ root->>OuterSphere.source </> s | s <- sources]
+            need [ root->>OuterSphere.foundationDll ]
+            need [ root->>OuterSphere.foundationInternal </> h | h <- foundationHeaders ]
+            need [ foundationTargetH, foundationTargetCpp ]
+            Exit e <- cmd Shell (Cwd ubt)
+                     _unrealBuildTool
+                     [ "OuterSphereEditor"
+                     , "Win64"
+                     , "Development"
+                     , root->>OuterSphere.uproject ]
+            case e of
+              ExitSuccess   -> putNormal "=== OuterSphere Build Complete ==="
+              ExitFailure 2 -> putNormal "=== OuterSphere is up to date ==="
+              ExitFailure 5 -> putNormal "=== OuterSphere 'should' be good ==="
+              ExitFailure n -> error $ "!! Error (" ++ (show n) ++ ") while building OuterSphere !!"
+  where
+      _stack :: FilePath
+      _stack = "stack"
+
+      _build :: FilePath
+      _build = "build"
+
+      _unrealBuildTool :: FilePath
+      _unrealBuildTool = "UnrealBuildTool"
+
+
+messageError :: Text -> IO ()
+messageError t = putStrLn ("Error: " ++ t)
+
+data Environment = Environment
+  {
+      root :: FilePath,
+      ubt :: FilePath
+  }
+
+
+

@@ -1,0 +1,11 @@
+
+module Paths where
+
+import System.FilePath
+import System.Directory
+
+root = takeDirectory <$> getCurrentDirectory
+
+globalBuild = (</> "Intermediate")
+
+selfDependency = globalBuild >>> (</> "BuildSystem.txt")

@@ -1,0 +1,72 @@
+
+module Languages.Hsk where
+
+import Languages.Core
+
+import Control.Lens
+import Data.Word
+import Data.Attoparsec.Text as DAT
+
+import Control.Monad.State.Lazy
+import Control.Monad.Loops
+
+
+data HskType
+  = IntT
+  | UnitT
+  | IOT HskType
+  | StablePtrT HskType
+  | ForeignPtrT HskType
+  | FuncT [HskType] HskType
+  deriving (Show)
+
+type Definition = Named HskType
+
+
+parseExports :: Text -> [Definition]
+parseExports =  rights . fmap (parseOnly parseCCall) . lines
+
+parseCCall :: Parser Definition
+parseCCall = do string "foreign export ccall"
+                defParser
+
+defParser :: Parser Definition
+defParser = do skipSpace
+               name <- DAT.takeWhile (not . isHorizontalSpace)
+               skipSpace
+               string "::"
+               skipSpace
+               type1 <- typeParser
+               types <- many $ do skipSpace
+                                  string "->"
+                                  typeParser
+               let (args, ret) = pushBack type1 types
+               return $ Tagged name (FuncT args ret)
+  where
+      pushBack :: a -> [a] -> ([a], a)
+      pushBack a [] = ([], a)
+      pushBack a (x:xs) = _1 %~ (a:) $ pushBack x xs
+
+
+typeParser :: Parser HskType
+typeParser = do skipSpace
+                int <|> io <|> stablePtr <|> foreignPtr <|> parens
+  where int        = string "Int" >> return IntT
+        io         = string "IO" >> (IOT <$> typeParser)
+        stablePtr  = string "StablePtr" >> (StablePtrT <$> typeParser)
+        foreignPtr = string "ForeignPtr" >> (ForeignPtrT <$> typeParser)
+        parens :: Parser HskType
+        parens = do char '('
+                    txt <- pack <$> snd <$> execStateT f (1,[])
+                    case parseOnly typeParser txt of
+                      (Left err) -> fail err
+                      (Right t) -> return t
+          where
+              f :: StateT (Int, [Char]) Parser ()
+              f = choice
+                  [
+                      lift (char '(') *> modify (first (+1)),
+                      lift (char ')') *> modify (first (\a -> a-1)),
+                      modify . second . (:) =<< lift anyChar
+                  ] `untilM_` ((== 0) <$> fst <$> get)
+
